@@ -1,0 +1,212 @@
+// ParkEase — Prisma schema (STAGE 2, REVISED: LEAN MVP)
+//
+// Priority for this stage is a working hackathon demo of four flows:
+// browse parking, submit community parking, verify/report it, and book
+// it. Authentication, provider profiles, reviews, saved parking and
+// availability history are deliberately deferred — this schema only
+// models what those four flows actually need.
+//
+// NOTE: this replaces the broader Stage 2 schema draft (User roles,
+// passwordHash, ProviderProfile, Review, SavedParking, AvailabilityLog,
+// a separate Report model) that was started earlier in this session. Per
+// the updated brief, that work is being shelved — not implemented here —
+// in favor of this smaller model. Nothing below is a partial version of
+// that draft; it's a fresh, intentionally minimal schema.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =======================================================================
+// User
+// =======================================================================
+// No authentication yet: no passwordHash, no role. Just enough to
+// attribute submissions, verifications, reports and bookings to someone.
+// The demo seed creates one user; the frontend can hardcode/select that
+// user's id until real auth is built.
+
+model User {
+  id    String @id @default(cuid())
+  name  String
+  email String @unique
+
+  createdAt DateTime @default(now())
+
+  submittedParkingSpots ParkingSpot[]
+  uploadedImages        ParkingImage[]
+  verifications         Verification[]
+  bookings              Booking[]
+
+  @@map("users")
+}
+
+// =======================================================================
+// Parking spot
+// =======================================================================
+
+enum ParkingType {
+  PUBLIC
+  PRIVATE
+  COMMUNITY
+
+  @@map("parking_type")
+}
+
+/// Trust/verification lifecycle of the listing. PUBLIC/PRIVATE spots are
+/// not auto-verified just because of their type — see UNDER_REVIEW below.
+enum ParkingVerificationStatus {
+  UNDER_REVIEW // default for newly created PUBLIC/PRIVATE listings
+  COMMUNITY_SUBMITTED // default for newly created COMMUNITY listings
+  COMMUNITY_VERIFIED // reached the verification threshold (see constants.ts)
+  REJECTED
+
+  @@map("parking_verification_status")
+}
+
+enum ParkingSpotStatus {
+  ACTIVE
+  INACTIVE
+  CLOSED
+
+  @@map("parking_spot_status")
+}
+
+model ParkingSpot {
+  id          String      @id @default(cuid())
+  name        String
+  description String?
+  type        ParkingType
+
+  address   String?
+  latitude  Float
+  longitude Float
+
+  totalCapacity     Int?
+  availableCapacity Int?
+  pricePerHour      Decimal? @db.Decimal(10, 2)
+
+  // Free-form time-of-day strings (e.g. "08:00"); null means unknown/24x7.
+  openingTime String?
+  closingTime String?
+
+  verificationStatus ParkingVerificationStatus @default(UNDER_REVIEW)
+  status             ParkingSpotStatus         @default(ACTIVE)
+
+  // Business-meaning "data freshness" timestamp, distinct from `updatedAt`
+  // (which changes on any edit). Bumped whenever availability changes.
+  lastUpdated DateTime?
+
+  // Only set for COMMUNITY submissions. Kept null-safe (SetNull) so a
+  // spot survives if the submitting user is ever removed.
+  submittedById String?
+  submittedBy   User?   @relation(fields: [submittedById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  images        ParkingImage[]
+  verifications Verification[]
+  bookings      Booking[]
+
+  @@index([type])
+  @@index([verificationStatus])
+  @@index([status])
+  @@index([latitude, longitude])
+  @@map("parking_spots")
+}
+
+// =======================================================================
+// Parking image
+// =======================================================================
+
+model ParkingImage {
+  id            String      @id @default(cuid())
+  parkingSpotId String
+  parkingSpot   ParkingSpot @relation(fields: [parkingSpotId], references: [id], onDelete: Cascade)
+
+  uploadedById String?
+  uploadedBy   User?   @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+
+  imageUrl String
+
+  createdAt DateTime @default(now())
+
+  @@index([parkingSpotId])
+  @@map("parking_images")
+}
+
+// =======================================================================
+// Verification (covers both "verify" and "report" actions)
+// =======================================================================
+// Kept as a single model rather than splitting verify/report into two
+// models — the brief explicitly asks for one lean model here, not the
+// separate Verification+Report pair from the earlier draft. For a REPORT,
+// the reason (one of a fixed set — see the report validator) is written
+// into `comment`; there's no separate `reason` column at this stage.
+
+enum VerificationType {
+  VERIFY
+  REPORT
+
+  @@map("verification_type")
+}
+
+model Verification {
+  id            String      @id @default(cuid())
+  parkingSpotId String
+  parkingSpot   ParkingSpot @relation(fields: [parkingSpotId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type    VerificationType
+  comment String?
+
+  createdAt DateTime @default(now())
+
+  // One VERIFY (or one REPORT) per user per spot — stops a single user
+  // from inflating the verification count or spamming reports.
+  @@unique([parkingSpotId, userId, type])
+  @@index([parkingSpotId])
+  @@map("verifications")
+}
+
+// =======================================================================
+// Booking
+// =======================================================================
+// Deliberately minimal: no payment status, no slot number, no separate
+// PENDING/EXPIRED states. A booking is created already CONFIRMED (this
+// stage has no payment step to wait on) and can only move to CANCELLED
+// or COMPLETED.
+
+enum BookingStatus {
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+
+  @@map("booking_status")
+}
+
+model Booking {
+  id            String      @id @default(cuid())
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parkingSpotId String
+  parkingSpot   ParkingSpot @relation(fields: [parkingSpotId], references: [id], onDelete: Cascade)
+
+  startTime DateTime
+  endTime   DateTime
+  amount    Decimal       @db.Decimal(10, 2)
+  status    BookingStatus @default(CONFIRMED)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([parkingSpotId])
+  @@index([status])
+  @@map("bookings")
+}
